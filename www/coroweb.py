@@ -129,18 +129,16 @@ class RequestHandler(object):
                 if not request.content_type:  # content_type是request提交的消息主体类型，没有就返回丢失消息主体类型
                     return web.HTTPBadRequest('Missing Content-Type')
                 ct = request.content_type.lower()
-                if ct.startwith('application/json'):  # 主体是json对象
+                if ct.startswith('application/json'):  # 主体是json对象
                     params = await request.json()  # 用json方法读取信息
                     if not isinstance(params, dict):
                         return web.HTTPBadRequest('JSON body must be object.')
                     kw = params
-                elif ct.startwith('application/x-www-form-urlencoded') or ct.startwith('multipart/form-data'):
+                elif ct.startswith('application/x-www-form-urlencoded') or ct.startwith('multipart/form-data'):
                     params = await request.post()  # 浏览器表单信息用post读取
                     kw = dict(**params)
                 else:
-                    return web.HTTPBadRequest(
-                        "Unsupported Content-Type:%s" %
-                        request.content_type)
+                    return web.HTTPBadRequest('Unsupported Content-Type: %s' % request.content_type)
 
             if request.method == 'GET':
                 qs = request.query_string  # 获取请求字符串
@@ -154,7 +152,7 @@ class RequestHandler(object):
             kw = dict(**request.match_info)
         else:
             # 没有关键字参数但有命名关键字参数
-            if not self.has_var_kw_arg and self._named_kw_args:
+            if not self._has_var_kw_arg and self._named_kw_args:
                 copy = dict()
                 for name in self._named_kw_args:  # 把命名关键字都提取出来，存入copy这个dict
                     if name in kw:

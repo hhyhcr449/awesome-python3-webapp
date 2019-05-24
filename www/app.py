@@ -1,13 +1,15 @@
 import time
 import json
 import os
-from coroweb import add_routes, add_static
-import orm
 from jinja2 import Environment, FileSystemLoader
 from aiohttp import web
 from datetime import datetime
-import asyncio# IO
+import asyncio  # IO
 import logging
+
+import orm
+from handlers import cookie2user, COOKIE_NAME
+from coroweb import add_routes, add_static
 logging.basicConfig(level=logging.INFO)  # INFO：确认一切按预期运行
 '''
 async web application
@@ -111,6 +113,9 @@ async def response_factory(app, handler):
                 return resp
             # 存在对应模板的,则将套用模板,用request handler的结果进行渲染
             else:
+                # 增加__user__,前端页面将依次来决定是否显示用户信息，
+                # __user__在用户登陆后被auth_factory绑定到request中
+                r["__user__"] = request.__user__
                 resp = web.Response(
                     body=app['__templating__'].get_template(template).render(
                         **r).encode('utf-8'))
@@ -121,56 +126,83 @@ async def response_factory(app, handler):
         if isinstance(r, int) and r >= 100 and r < 600:
             return web.Response
         # 若响应结果为元组,并且长度为2
-        if isinstance(r,tuple) and len(r) ==2:
+        if isinstance(r, tuple) and len(r) == 2:
             # t为http状态码,m为错误描述
             # 判断t是否满足100~600的条件
-            t,m=r
-            if isinstance(t,int) and t >=100 and t<600:
+            t, m = r
+            if isinstance(t, int) and t >= 100 and t < 600:
                 # 返回状态码与错误描述
                 return web.Response(t, str(m))
         # 默认以字符串形式返回响应结果,设置类型为普通文本
-        resp=web.Response(body=str(r).encode('utf-8'))
-        resp.content_type='text/plain;charset=utf-8'
+        resp = web.Response(body=str(r).encode('utf-8'))
+        resp.content_type = 'text/plain;charset=utf-8'
         return resp
     return response
 
-#时间过滤器的作用：返回日志创建的大概时间，用于显示在日志标题下面，
-def datetime_filter(t):
-    delta=int(time.time()-t)
-    if delta<60:
-        return u'one minute ago'
-    if delta<3600:
-        return u'%s minutes ago'%(delta//60)
-    if delta<86400:
-        return u'%s hours ago'%(delta//3600)
-    if delta<604800:
-        return u'%s days ago'(delta//86400)
-    dt=datetime.fromtimestamp(t)
-    return u'%s year %s hour %s day' %(dt.year,dt.month,dt.day)
+# 在处理请求之前,先将cookie解析出来,并将登录用户绑定到request对象上
+# 这样后续的url处理函数就可以直接拿到登录用户
+# 以后的每个请求,都是在这个middle之后处理的,都已经绑定了用户信息
 
+
+async def auth_factory(app, handler):
+    async def auth(request):
+        logging.info("check user: %s %s" % (request.method, request.path))
+        request.__user__ = None
+        # 通过cookie名取得加密cookie字符串(handlers.py中有定义set_cookie)
+        cookie_str = request.cookies.get(COOKIE_NAME)
+        if cookie_str:
+            user = await cookie2user(cookie_str)  # 验证cookie,并得到用户信息
+            if user:
+                logging.info("set current user: %s" % user.email)
+                request.__user__ = user  # 将用户信息绑定到请求上
+            # 请求的路径是管理页面,但用户非管理员,将会重定向到登录页面
+        if request.path.startswith(
+                '/manage/') and (request.__user__ is None or not request.__user__.admin):
+            return web.HTTPFound('/signin')
+        return (await handler(request))
+    return auth
+
+# 时间过滤器的作用：返回日志创建的大概时间，用于显示在日志标题下面，
+
+
+def datetime_filter(t):
+    delta = int(time.time() - t)
+    if delta < 60:
+        return u'one minute ago'
+    if delta < 3600:
+        return u'%s minutes ago' % (delta // 60)
+    if delta < 86400:
+        return u'%s hours ago' % (delta // 3600)
+    if delta < 604800:
+        return u'%s days ago'(delta // 86400)
+    dt = datetime.fromtimestamp(t)
+    return u'%s year %s hour %s day' % (dt.year, dt.month, dt.day)
 
 
 async def init(loop):
-    #创建数据库连接池
+    # 创建数据库连接池
     await orm.create_pool(loop=loop, host='127.0.0.1', port=3306, user='root', password='qq519525005', db='awesome')
-    #创建Web服务器实例app，作用是处理URL、http协议
+    # 创建Web服务器实例app，作用是处理URL、http协议
     app = web.Application(loop=loop, middlewares=[
-        logger_factory, response_factory
+        logger_factory, response_factory,  auth_factory,data_factory
     ])
-    #初始化jinja2模板，并传入时间过滤器
+    # 初始化jinja2模板，并传入时间过滤器
+    # 主要是初始化了jinja2 env(环境), 并将jinja2 env绑定到webapp的__templating__属性上
     init_jinja2(app, filters=dict(datetime=datetime_filter))
-    #将处理函数注册到Web服务器的应用路径
-    add_routes(app, 'handlers')#handlers指的是handlers模块也就是handlers.py
+    # 将处理函数注册到Web服务器的应用路径
+    add_routes(app, 'handlers')  # handlers指的是handlers模块也就是handlers.py
     add_static(app)
-    #用协程创建监听服务，并使用aiohttp中的HTTP协议簇
-    #srv,即SocketSever
+    # 用协程创建监听服务，并使用aiohttp中的HTTP协议簇
+    # srv,即SocketSever
     srv = await loop.create_server(app.make_handler(), '127.0.0.1', 9000)
     logging.info('server started at http://127.0.0.1:9000...')
-    return srv#返回监听服务，
+    return srv  # 返回监听服务，
 
 # 创建协程，初始化协程，返回监听服务，进入协程执行
-loop = asyncio.get_event_loop()#创建协程
-loop.run_until_complete(init(loop))#初始化协程，
-loop.run_forever()#进入协程执行
+loop = asyncio.get_event_loop()  # 创建协程
+loop.run_until_complete(init(loop))  # 初始化协程，
+loop.run_forever()  # 进入协程执行
 
 init()
+
+
